@@ -11,8 +11,55 @@ import streamlit as st
 
 
 DATA_FILE = Path("data_omma.xlsx")
+BASE_LABEL_SHEET_NAME = "DATA DASAR (2)"
 SHEET_NAME = "DATA CLEARING FINAL"
 IDENTITY_COL_COUNT = 17
+
+QUESTION_META_COLUMNS = [
+    "column",
+    "source_index",
+    "code",
+    "axis",
+    "construct",
+    "question",
+    "valid_count",
+]
+
+AGREEMENT_ORDER = [
+    "Sangat Tidak Setuju",
+    "Tidak Setuju",
+    "Netral",
+    "Setuju",
+    "Sangat Setuju",
+]
+
+AGREEMENT_NUMERIC_4 = {
+    1: "Sangat Tidak Setuju",
+    2: "Tidak Setuju",
+    3: "Setuju",
+    4: "Sangat Setuju",
+}
+
+AGREEMENT_NUMERIC_5 = {
+    1: "Sangat Tidak Setuju",
+    2: "Tidak Setuju",
+    3: "Netral",
+    4: "Setuju",
+    5: "Sangat Setuju",
+}
+
+AGREEMENT_TRANSLATIONS_EN = {
+    "Sangat Tidak Setuju": "Strongly Disagree",
+    "Tidak Setuju": "Disagree",
+    "Netral": "Neutral",
+    "Setuju": "Agree",
+    "Sangat Setuju": "Strongly Agree",
+}
+
+CONSTRUCT_LABEL_OVERRIDES = {
+    "Y2.1": "PERAN PESANTREN DALAM PENGEMBANGAN USAHA",
+    "Y2.2": "KEMANDIRIAN PETANI",
+}
 
 PALETTE = [
     "#0E7490",
@@ -44,6 +91,7 @@ EXPENSE_INCOME_RATIO_FOR_EXTRA_ZERO = 2
 MAX_LAND_SIZE_HECTARE = 50
 MAX_TREE_COUNT = 5_000
 MAX_FARMING_YEARS = 80
+REGION_TOP_N = None
 
 
 def language_code(choice: str) -> str:
@@ -90,11 +138,19 @@ TEXT = {
         "overview": "Ikhtisar",
         "categorical": "Variabel Kategori",
         "numeric": "Variabel Numerik",
+        "question_responses": "Pertanyaan Clearing",
         "processed_data": "Data Terolah",
         "profile_snapshot": "Gambaran Cepat Profil",
         "gender_pie": "Perbandingan Laki-laki dan Perempuan",
         "top_regions": "Wilayah Responden Terbanyak",
         "education_profile": "Profil Pendidikan Responden",
+        "question_visualization": "Visualisasi Jawaban Pertanyaan",
+        "question_group": "Kelompok Pertanyaan",
+        "question_count": "Jumlah Pertanyaan",
+        "valid_answers": "Jawaban Valid",
+        "dominant_answer": "Jawaban Dominan",
+        "answer_composition": "Komposisi Jawaban",
+        "no_question_data": "Data pertanyaan clearing tidak tersedia untuk sumber data ini.",
         "numeric_summary": "Statistik Deskriptif Numerik",
         "data_completeness": "Kelengkapan Data",
         "missing_count": "Jumlah Kosong",
@@ -160,11 +216,19 @@ TEXT = {
         "overview": "Overview",
         "categorical": "Categorical Variables",
         "numeric": "Numeric Variables",
+        "question_responses": "Clearing Questions",
         "processed_data": "Processed Data",
         "profile_snapshot": "Quick Profile Snapshot",
         "gender_pie": "Male and Female Comparison",
         "top_regions": "Largest Respondent Regions",
         "education_profile": "Respondent Education Profile",
+        "question_visualization": "Question Response Visualization",
+        "question_group": "Question Group",
+        "question_count": "Question Count",
+        "valid_answers": "Valid Answers",
+        "dominant_answer": "Dominant Answer",
+        "answer_composition": "Answer Composition",
+        "no_question_data": "Clearing question data is not available for this data source.",
         "numeric_summary": "Numeric Descriptive Statistics",
         "data_completeness": "Data Completeness",
         "missing_count": "Missing Count",
@@ -422,6 +486,34 @@ def clean_column_name(value: object) -> str:
     text = re.sub(r"^[A-Za-z]\d+\s+", "", text)
     text = text.replace("No Hp", "No HP").replace("No hp", "No HP")
     return text
+
+
+def clean_header_label(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    text = normalize_spaces(value)
+    if not text or text.lower().startswith("unnamed:"):
+        return ""
+    return text
+
+
+def clean_construct_code(value: object) -> str:
+    text = clean_header_label(value).upper().replace(" ", "")
+    text = text.replace("X.", "X").replace("Y.", "Y")
+    return text
+
+
+def clean_question_text(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    return normalize_spaces(value).rstrip()
+
+
+def has_content(value: object) -> bool:
+    if pd.isna(value):
+        return False
+    text = normalize_spaces(value)
+    return bool(text) and text.lower() not in {"nan", "none", "-"}
 
 
 def parse_number_token(token: str) -> float:
@@ -739,6 +831,133 @@ def read_excel_data(source: str | BytesIO) -> pd.DataFrame:
     raise ValueError(t("no_readable_excel"))
 
 
+def empty_question_bundle() -> tuple[pd.DataFrame, pd.DataFrame]:
+    return pd.DataFrame(), pd.DataFrame(columns=QUESTION_META_COLUMNS)
+
+
+def rewind_source(source: str | BytesIO) -> None:
+    if hasattr(source, "seek"):
+        source.seek(0)
+
+
+def normalize_agreement_text(value: object) -> str | None:
+    if not has_content(value):
+        return None
+
+    text = normalize_spaces(value).lower().replace("_", " ").replace("-", " ")
+    text = re.sub(r"[^a-zA-Z\s]", " ", text)
+    text = normalize_spaces(text)
+
+    if "sangat" in text and "tidak" in text and "setuju" in text:
+        return "Sangat Tidak Setuju"
+    if ("tidak" in text or "kurang" in text) and "setuju" in text:
+        return "Tidak Setuju"
+    if "netral" in text or "ragu" in text:
+        return "Netral"
+    if "sangat" in text and "setuju" in text:
+        return "Sangat Setuju"
+    if "setuju" in text:
+        return "Setuju"
+    return None
+
+
+def normalize_agreement_series(series: pd.Series) -> pd.Series:
+    text_result = series.map(normalize_agreement_text)
+    if text_result.notna().sum() > 0:
+        return text_result
+
+    numeric = pd.to_numeric(series, errors="coerce")
+    if numeric.notna().sum() == 0:
+        return pd.Series(index=series.index, dtype="object")
+
+    rounded = numeric.round().astype("Int64")
+    numeric_map = AGREEMENT_NUMERIC_5 if numeric.max() > 4 else AGREEMENT_NUMERIC_4
+    return rounded.map(numeric_map)
+
+
+def agreement_label(value: object) -> str:
+    if pd.isna(value):
+        return t("not_filled")
+    text = str(value)
+    if text == "Tidak Diisi":
+        return t("not_filled")
+    if APP_LANG == "en":
+        return AGREEMENT_TRANSLATIONS_EN.get(text, text)
+    return text
+
+
+def read_header_rows(source: str | BytesIO, sheet_name: str) -> pd.DataFrame:
+    rewind_source(source)
+    return pd.read_excel(source, sheet_name=sheet_name, header=None, nrows=2)
+
+
+def read_clearing_question_data(
+    source: str | BytesIO,
+    extension: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if extension.lower() not in {".xlsx", ".xls"}:
+        return empty_question_bundle()
+
+    clearing_headers = read_header_rows(source, SHEET_NAME)
+    try:
+        base_headers = read_header_rows(source, BASE_LABEL_SHEET_NAME)
+    except Exception:
+        base_headers = pd.DataFrame()
+
+    rewind_source(source)
+    clearing_data = pd.read_excel(source, sheet_name=SHEET_NAME, header=1)
+    if clearing_data.empty:
+        return empty_question_bundle()
+
+    question_data = pd.DataFrame(index=clearing_data.index)
+    metadata: list[dict[str, object]] = []
+    max_columns = min(clearing_headers.shape[1], clearing_data.shape[1])
+    construct_labels = (
+        base_headers.iloc[0].ffill() if not base_headers.empty else pd.Series(dtype="object")
+    )
+    clearing_codes = clearing_headers.iloc[0].ffill()
+
+    for position in range(IDENTITY_COL_COUNT, max_columns):
+        code = clean_construct_code(clearing_codes.iloc[position])
+        if not re.match(r"^[XY]\d", code):
+            continue
+
+        question = clean_question_text(clearing_headers.iat[1, position])
+        if not question:
+            continue
+
+        normalized = normalize_agreement_series(clearing_data.iloc[:, position])
+        non_empty_count = int(clearing_data.iloc[:, position].map(has_content).sum())
+        valid_count = int(normalized.notna().sum())
+        if valid_count == 0 or (non_empty_count and valid_count / non_empty_count < 0.65):
+            continue
+
+        raw_construct = (
+            construct_labels.iloc[position] if position < len(construct_labels) else ""
+        )
+        construct = CONSTRUCT_LABEL_OVERRIDES.get(code, clean_header_label(raw_construct))
+        if not construct or construct == "IDENTITAS RESPONDEN":
+            construct = clean_question_text(question)
+
+        column_name = f"PERTANYAAN_CLEARING_{len(metadata) + 1:03d}"
+        question_data[column_name] = normalized
+        metadata.append(
+            {
+                "column": column_name,
+                "source_index": position,
+                "code": code,
+                "axis": code[:1],
+                "construct": construct.title(),
+                "question": question,
+                "valid_count": valid_count,
+            }
+        )
+
+    if not metadata:
+        return empty_question_bundle()
+    return question_data, pd.DataFrame(metadata, columns=QUESTION_META_COLUMNS)
+
+
 def read_raw_data(source: str | BytesIO, extension: str) -> pd.DataFrame:
     extension = extension.lower()
     if extension in {".xlsx", ".xls"}:
@@ -814,9 +1033,25 @@ def load_existing_data(file_path: str, file_signature: int) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
+def load_existing_question_data(
+    file_path: str,
+    file_signature: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    return read_clearing_question_data(file_path, Path(file_path).suffix)
+
+
+@st.cache_data(show_spinner=False)
 def load_uploaded_data(file_name: str, file_content: bytes) -> pd.DataFrame:
     raw = read_raw_data(BytesIO(file_content), Path(file_name).suffix)
     return process_raw_data(raw)
+
+
+@st.cache_data(show_spinner=False)
+def load_uploaded_question_data(
+    file_name: str,
+    file_content: bytes,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    return read_clearing_question_data(BytesIO(file_content), Path(file_name).suffix)
 
 
 def format_integer(value: float) -> str:
@@ -864,6 +1099,31 @@ def category_label(value: object) -> str:
     if APP_LANG == "en":
         return CATEGORY_TRANSLATIONS.get("en", {}).get(text, text)
     return text
+
+
+REGION_BUCKETS_TO_MERGE = {
+    "Tidak Diisi",
+    "Lainnya",
+    "Lainya",
+    "Lain Nya",
+    "Wilayah Lainnya",
+    "Wilayah Lainya",
+    "Wilayah Lain Nya",
+}
+
+
+def merge_counts_to_largest(counts: pd.Series, labels_to_merge: set[str]) -> pd.Series:
+    labels = [label for label in labels_to_merge if label in counts.index]
+    if not labels:
+        return counts
+
+    remaining = counts.drop(index=labels)
+    if remaining.empty:
+        return counts
+
+    target_label = remaining.idxmax()
+    remaining.loc[target_label] += counts.loc[labels].sum()
+    return remaining
 
 
 def format_percent(value: float, digits: int = 1) -> str:
@@ -936,19 +1196,25 @@ def prepare_category_counts(
     else:
         series = series.fillna("Tidak Diisi")
     counts = series.value_counts()
+    is_region_column = column == "Wilayah"
+
+    if is_region_column:
+        counts = merge_counts_to_largest(counts, REGION_BUCKETS_TO_MERGE)
+    total_count = counts.sum()
 
     if order:
         ordered = [item for item in order if item in counts.index]
         remaining = [item for item in counts.index if item not in ordered]
         counts = counts.reindex(ordered + remaining)
 
-    if top_n and len(counts) > top_n:
+    if top_n and not is_region_column and len(counts) > top_n:
         top_counts = counts.head(top_n)
-        counts = pd.concat([top_counts, pd.Series({"Lainnya": counts.iloc[top_n:].sum()})])
+        remaining_total = counts.iloc[top_n:].sum()
+        counts = pd.concat([top_counts, pd.Series({"Lainnya": remaining_total})])
 
     chart = counts.rename_axis("Kategori Asli").reset_index(name="Jumlah")
     chart["Kategori"] = chart["Kategori Asli"].map(category_label)
-    chart["Persentase"] = chart["Jumlah"] / chart["Jumlah"].sum() * 100
+    chart["Persentase"] = chart["Jumlah"] / total_count * 100
     chart["Label"] = chart.apply(
         lambda row: f"{format_integer(row['Jumlah'])} ({format_percent(row['Persentase'])})",
         axis=1,
@@ -1068,6 +1334,66 @@ def donut_chart(
             "orientation": "h",
             "yanchor": "bottom",
             "y": -0.05,
+            "xanchor": "center",
+            "x": 0.5,
+        },
+        uniformtext={"minsize": 11, "mode": "hide"},
+    )
+    return fig
+
+
+def prepare_agreement_counts(data: pd.DataFrame, column: str) -> pd.DataFrame:
+    series = data[column].fillna("Tidak Diisi")
+    counts = series.value_counts()
+    total_count = counts.sum()
+    if total_count == 0:
+        return pd.DataFrame(columns=["Kategori Asli", "Kategori", "Jumlah", "Persentase"])
+
+    ordered = [item for item in AGREEMENT_ORDER + ["Tidak Diisi"] if item in counts.index]
+    remaining = [item for item in counts.index if item not in ordered]
+    counts = counts.reindex(ordered + remaining)
+
+    chart = counts.rename_axis("Kategori Asli").reset_index(name="Jumlah")
+    chart["Kategori"] = chart["Kategori Asli"].map(agreement_label)
+    chart["Persentase"] = chart["Jumlah"] / total_count * 100
+    return chart
+
+
+def agreement_pie_chart(
+    data: pd.DataFrame,
+    column: str,
+    title: str,
+    height: int = 340,
+) -> go.Figure:
+    chart = prepare_agreement_counts(data, column)
+    fig = go.Figure(
+        go.Pie(
+            labels=chart["Kategori"],
+            values=chart["Jumlah"],
+            sort=False,
+            marker={
+                "colors": [PALETTE[i % len(PALETTE)] for i in range(len(chart))],
+                "line": {"color": "#ffffff", "width": 2},
+            },
+            texttemplate="%{percent}",
+            textposition="inside",
+            hovertemplate=(
+                f"{t('category')}: %{{label}}<br>{t('count')}: %{{value}}"
+                f"<br>{t('percentage')}: %{{percent}}<extra></extra>"
+            ),
+        )
+    )
+    fig.update_layout(
+        title={"text": title, "x": 0.015, "xanchor": "left", "font": {"size": 16}},
+        template="plotly_white",
+        height=height,
+        font={"family": "Arial, sans-serif", "size": 12, "color": "#111827"},
+        paper_bgcolor="white",
+        margin={"l": 16, "r": 16, "t": 58, "b": 34},
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": -0.08,
             "xanchor": "center",
             "x": 0.5,
         },
@@ -1346,6 +1672,91 @@ def render_numeric_profile(
         )
 
 
+def question_group_summary(data: pd.DataFrame, metadata: pd.DataFrame) -> pd.DataFrame:
+    records: list[dict[str, object]] = []
+    for _, item in metadata.iterrows():
+        column = item["column"]
+        chart = prepare_agreement_counts(data, column)
+        chart = chart[chart["Kategori Asli"] != "Tidak Diisi"]
+        valid_total = int(chart["Jumlah"].sum())
+        if valid_total == 0:
+            records.append(
+                {
+                    t("variable"): item["question"],
+                    t("dominant_answer"): "-",
+                    t("count"): 0,
+                    t("percentage"): "-",
+                    t("valid_data"): 0,
+                }
+            )
+            continue
+
+        top_answer = chart.sort_values("Jumlah", ascending=False).iloc[0]
+        records.append(
+            {
+                t("variable"): item["question"],
+                t("dominant_answer"): top_answer["Kategori"],
+                t("count"): int(top_answer["Jumlah"]),
+                t("percentage"): format_percent(top_answer["Jumlah"] / valid_total * 100),
+                t("valid_data"): valid_total,
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def render_question_response_profile(data: pd.DataFrame, metadata: pd.DataFrame) -> None:
+    if data.empty or metadata.empty:
+        st.info(t("no_question_data"))
+        return
+
+    metadata = metadata[metadata["column"].isin(data.columns)].copy()
+    if metadata.empty:
+        st.info(t("no_question_data"))
+        return
+
+    group_options = list(dict.fromkeys(metadata["construct"].dropna().tolist()))
+    selected_group = st.selectbox(
+        t("question_group"),
+        group_options,
+        key="question_group_filter",
+    )
+    selected_metadata = metadata[metadata["construct"] == selected_group].reset_index(drop=True)
+
+    st.subheader(selected_group)
+    metric_cols = st.columns(3)
+    metric_cols[0].metric(t("question_count"), format_integer(len(selected_metadata)))
+    metric_cols[1].metric(
+        t("valid_answers"),
+        format_integer(int(data[selected_metadata["column"]].notna().sum().sum())),
+    )
+    metric_cols[2].metric(t("respondents"), format_integer(len(data)))
+
+    summary = question_group_summary(data, selected_metadata)
+    st.dataframe(summary, width="stretch", hide_index=True)
+
+    for start in range(0, len(selected_metadata), 2):
+        columns = st.columns(2)
+        for offset, container in enumerate(columns):
+            index = start + offset
+            if index >= len(selected_metadata):
+                continue
+
+            item = selected_metadata.iloc[index]
+            chart = prepare_agreement_counts(data, item["column"])
+            with container:
+                st.markdown(f"**{item['question']}**")
+                if chart.empty or chart["Jumlah"].sum() == 0:
+                    st.warning(t("no_data"))
+                    continue
+                show_plot(
+                    agreement_pie_chart(
+                        data,
+                        item["column"],
+                        t("answer_composition"),
+                    )
+                )
+
+
 with st.sidebar:
     language_choice = st.radio(
         t("language"),
@@ -1379,7 +1790,9 @@ with st.sidebar:
 
     if st.button(t("reload_data"), use_container_width=True):
         load_existing_data.clear()
+        load_existing_question_data.clear()
         load_uploaded_data.clear()
+        load_uploaded_question_data.clear()
         st.rerun()
 
     try:
@@ -1388,12 +1801,20 @@ with st.sidebar:
                 st.info(t("upload_missing"))
                 st.stop()
             data = load_uploaded_data(uploaded_file.name, uploaded_file.getvalue())
+            question_data, question_metadata = load_uploaded_question_data(
+                uploaded_file.name,
+                uploaded_file.getvalue(),
+            )
         else:
             if not DATA_FILE.exists():
                 st.error(t("file_not_found").format(file_name=DATA_FILE))
                 st.stop()
             data_signature = DATA_FILE.stat().st_mtime_ns
             data = load_existing_data(str(DATA_FILE), data_signature)
+            question_data, question_metadata = load_existing_question_data(
+                str(DATA_FILE),
+                data_signature,
+            )
     except Exception as error:
         st.error(t("data_load_error").format(error=error))
         st.stop()
@@ -1449,6 +1870,13 @@ filtered = data[
 if filtered.empty:
     st.warning(t("no_data"))
     st.stop()
+
+
+if question_data.empty:
+    filtered_question_data = pd.DataFrame()
+else:
+    filtered_question_index = [index for index in filtered.index if index in question_data.index]
+    filtered_question_data = question_data.loc[filtered_question_index].copy()
 
 
 numeric_profiles = [
@@ -1590,11 +2018,12 @@ metric_cols[5].metric(
     format_measure(filtered["Produksi Rata-rata (ton/bulan)"].median(), 2, "ton/bln", "tons/month"),
 )
 
-tab_overview, tab_category, tab_numeric, tab_data = st.tabs(
+tab_overview, tab_category, tab_numeric, tab_questions, tab_data = st.tabs(
     [
         t("overview"),
         t("categorical"),
         t("numeric"),
+        t("question_responses"),
         t("processed_data"),
     ]
 )
@@ -1620,9 +2049,9 @@ with tab_overview:
                 filtered,
                 "Wilayah",
                 t("top_regions"),
-                top_n=8,
+                top_n=REGION_TOP_N,
                 orientation="h",
-                height=390,
+                height=460,
                 label=variable_label("Wilayah"),
             )
         )
@@ -1724,7 +2153,7 @@ with tab_category:
         render_category_profile(
             filtered,
             "Wilayah",
-            top_n=12,
+            top_n=REGION_TOP_N,
             orientation="h",
             height=460,
         )
@@ -1764,6 +2193,11 @@ with tab_numeric:
             unit_en=profile["unit_en"],
             bins=profile["bins"],
         )
+
+
+with tab_questions:
+    st.subheader(t("question_visualization"))
+    render_question_response_profile(filtered_question_data, question_metadata)
 
 
 with tab_data:
