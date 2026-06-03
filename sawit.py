@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -33,15 +34,45 @@ PLOT_CONFIG = {
     "modeBarButtonsToRemove": ["lasso2d", "select2d"],
 }
 
+LANGUAGE_OPTIONS = ("Indonesia", "English")
+DATA_SOURCE_EXISTING = "existing"
+DATA_SOURCE_UPLOAD = "upload"
+UPLOAD_FILE_TYPES = ["xlsx", "csv", "parquet"]
+MAX_MONTHLY_HOUSEHOLD_MONEY = 250_000_000
+EXPENSE_EXTRA_ZERO_THRESHOLD = 20_000_000
+EXPENSE_INCOME_RATIO_FOR_EXTRA_ZERO = 2
+MAX_LAND_SIZE_HECTARE = 50
+MAX_TREE_COUNT = 5_000
+MAX_FARMING_YEARS = 80
 
-APP_LANG = "id"
+
+def language_code(choice: str) -> str:
+    return "en" if choice == "English" else "id"
+
+
+APP_LANG = language_code(st.session_state.get("language_choice", "Indonesia"))
 
 TEXT = {
     "id": {
+        "page_title": "Analisis Deskriptif Sawit",
         "main_title": "Profil Deskriptif Responden Petani Sawit",
         "intro": "Ringkasan ini menampilkan profil responden secara deskriptif agar karakter data mudah dibaca dari komposisi kategori, sebaran numerik, dan statistik inti.",
         "sidebar_title": "Pengaturan",
         "language": "Bahasa Tampilan",
+        "data_source": "Sumber Data",
+        "use_available_data": "Pakai Data Tersedia",
+        "upload_data": "Unggah Data",
+        "upload_file": "Unggah File Data",
+        "upload_help": "Gunakan file Excel, CSV, atau Parquet dengan struktur kolom data sawit yang sama.",
+        "upload_missing": "Silakan unggah file data untuk memakai mode unggah.",
+        "source_available_caption": "Menggunakan data tersedia: {file_name}",
+        "source_upload_caption": "Menggunakan data unggahan: {file_name}",
+        "file_not_found": "File data tidak ditemukan: {file_name}",
+        "data_load_error": "Data gagal dimuat: {error}",
+        "unsupported_file_type": "Format file tidak didukung: {extension}",
+        "missing_required_columns": "Kolom wajib tidak ditemukan: {columns}",
+        "no_readable_excel": "Tidak ada sheet Excel yang dapat dibaca.",
+        "invalid_age_filter": "Kolom umur tidak memiliki data valid untuk filter.",
         "filters": "Filter Profil",
         "reload_data": "Muat Ulang Data",
         "gender": "Jenis Kelamin",
@@ -90,12 +121,28 @@ TEXT = {
         "categorical_insight": "Kategori terbesar: {category} ({count} responden, {percent}).",
         "sanitized_dataset": "Dataset Analisis Tanpa Identitas Pribadi",
         "download_csv": "Unduh CSV Data Terolah",
+        "download_file_name": "profil_deskriptif_sawit_terolah.csv",
     },
     "en": {
+        "page_title": "Oil Palm Descriptive Analysis",
         "main_title": "Descriptive Profile of Oil Palm Farmer Respondents",
         "intro": "This summary describes respondent profiles through category composition, numeric distributions, and core descriptive statistics.",
         "sidebar_title": "Settings",
         "language": "Display Language",
+        "data_source": "Data Source",
+        "use_available_data": "Use Available Data",
+        "upload_data": "Upload Data",
+        "upload_file": "Upload Data File",
+        "upload_help": "Use an Excel, CSV, or Parquet file with the same oil palm data column structure.",
+        "upload_missing": "Please upload a data file to use upload mode.",
+        "source_available_caption": "Using available data: {file_name}",
+        "source_upload_caption": "Using uploaded data: {file_name}",
+        "file_not_found": "Data file was not found: {file_name}",
+        "data_load_error": "Data could not be loaded: {error}",
+        "unsupported_file_type": "Unsupported file format: {extension}",
+        "missing_required_columns": "Required columns are missing: {columns}",
+        "no_readable_excel": "No readable Excel sheet was found.",
+        "invalid_age_filter": "The age column has no valid data for filtering.",
         "filters": "Profile Filters",
         "reload_data": "Reload Data",
         "gender": "Gender",
@@ -144,6 +191,7 @@ TEXT = {
         "categorical_insight": "Largest category: {category} ({count} respondents, {percent}).",
         "sanitized_dataset": "Analysis Dataset Without Personal Identity",
         "download_csv": "Download Processed CSV",
+        "download_file_name": "oil_palm_descriptive_profile_processed.csv",
     },
 }
 
@@ -155,6 +203,10 @@ CATEGORY_TRANSLATIONS = {
         "Pernah Mengikuti": "Attended",
         "Belum Pernah": "Never Attended",
         "Petani": "Farmer",
+        "Buruh": "Laborer",
+        "Pedagang": "Trader",
+        "Guru": "Teacher",
+        "Wiraswasta": "Entrepreneur",
         "Tidak Sekolah": "No Schooling",
         "SD": "Elementary School",
         "SMP": "Junior High School",
@@ -226,10 +278,6 @@ VARIABLE_LABELS = {
         "id": "Status Pelatihan Sawit",
         "en": "Oil Palm Training Status",
     },
-    "Produktivitas Sawit (ton/ha/bulan)": {
-        "id": "Produktivitas Sawit (ton/ha/bulan)",
-        "en": "Oil Palm Productivity (tons/ha/month)",
-    },
     "Surplus Pendapatan (Rupiah/bulan)": {
         "id": "Surplus Pendapatan (Rupiah/bulan)",
         "en": "Income Surplus (Rupiah/month)",
@@ -246,7 +294,7 @@ VARIABLE_LABELS = {
 
 
 st.set_page_config(
-    page_title="Analisis Deskriptif Sawit",
+    page_title=TEXT[APP_LANG]["page_title"],
     page_icon=None,
     layout="wide",
     initial_sidebar_state="expanded",
@@ -380,6 +428,50 @@ def clean_column_name(value: object) -> str:
     return text
 
 
+def parse_number_token(token: str) -> float:
+    token = token.strip()
+    if not token:
+        return np.nan
+
+    sign = ""
+    if token.startswith("-"):
+        sign = "-"
+        token = token[1:]
+
+    if "." in token and "," in token:
+        last_dot = token.rfind(".")
+        last_comma = token.rfind(",")
+        decimal_separator = "," if last_comma > last_dot else "."
+        fractional = token.split(decimal_separator)[-1]
+        if len(fractional) <= 2:
+            thousands_separator = "." if decimal_separator == "," else ","
+            token = token.replace(thousands_separator, "").replace(decimal_separator, ".")
+        else:
+            token = token.replace(".", "").replace(",", "")
+    elif token.count(",") > 1 or token.count(".") > 1:
+        separator = "," if "," in token else "."
+        parts = token.split(separator)
+        if len(parts[-1]) <= 2 and all(len(part) == 3 for part in parts[1:-1]):
+            token = "".join(parts[:-1]) + "." + parts[-1]
+        else:
+            token = "".join(parts)
+    elif "," in token or "." in token:
+        separator = "," if "," in token else "."
+        whole, fractional = token.split(separator, 1)
+        whole_without_sign = whole.lstrip("-")
+        if len(fractional) <= 2 or whole_without_sign == "0":
+            token = f"{whole}.{fractional}"
+        elif len(fractional) == 3:
+            token = whole + fractional
+        else:
+            token = f"{whole}.{fractional}"
+
+    try:
+        return float(sign + token)
+    except ValueError:
+        return np.nan
+
+
 def extract_number(value: object) -> float:
     if pd.isna(value):
         return np.nan
@@ -387,25 +479,67 @@ def extract_number(value: object) -> float:
         return float(value)
 
     text = str(value).strip().lower()
+    range_match = re.search(
+        r"(\d+(?:[.,]\d+)*)\s*(?:-|–|—|s/d|sd|hingga|sampai|to)\s*(\d+(?:[.,]\d+)*)",
+        text,
+    )
+    if range_match:
+        low = parse_number_token(range_match.group(1))
+        high = parse_number_token(range_match.group(2))
+        if not pd.isna(low) and not pd.isna(high):
+            return (low + high) / 2
+
     match = re.search(r"-?\d+(?:[.,]\d+)*", text)
     if not match:
         return np.nan
+    return parse_number_token(match.group(0))
 
-    number = match.group(0)
-    if "." in number and "," in number:
-        if number.rfind(",") > number.rfind("."):
-            number = number.replace(".", "").replace(",", ".")
-        else:
-            number = number.replace(",", "")
-    elif "," in number:
-        number = number.replace(",", ".")
-    elif number.count(".") > 1:
-        number = number.replace(".", "")
 
-    try:
-        return float(number)
-    except ValueError:
+def parse_money_rupiah(value: object) -> float:
+    number = extract_number(value)
+    if pd.isna(number):
         return np.nan
+
+    text = str(value).lower()
+    if re.search(r"\b(juta|jt)\b", text):
+        return number * 1_000_000
+    if re.search(r"\b(ribu|rb)\b", text):
+        return number * 1_000
+
+    if 1_000 <= number < 100_000:
+        number *= 1_000
+    while number > MAX_MONTHLY_HOUSEHOLD_MONEY:
+        number /= 1_000
+    return number
+
+
+def parse_land_hectare(value: object) -> float:
+    number = extract_number(value)
+    if pd.isna(number):
+        return np.nan
+
+    text = str(value).lower()
+    if re.search(r"\b(m|m2|meter)\b|m²", text) and "ha" not in text:
+        return number / 10_000
+    while number > MAX_LAND_SIZE_HECTARE:
+        number /= 100
+    return number
+
+
+def parse_tree_count(value: object) -> float:
+    number = extract_number(value)
+    if pd.isna(number):
+        return np.nan
+    while number > MAX_TREE_COUNT:
+        number /= 1_000
+    return number
+
+
+def parse_farming_years(value: object) -> float:
+    number = extract_number(value)
+    if pd.isna(number) or number > MAX_FARMING_YEARS:
+        return np.nan
+    return number
 
 
 def parse_production_ton(value: object) -> float:
@@ -547,16 +681,84 @@ def extract_region(value: object) -> str:
     return first_part.title() if first_part else "Wilayah Lainnya"
 
 
-@st.cache_data(show_spinner=False)
-def load_data(file_path: str, file_signature: int) -> pd.DataFrame:
-    raw = pd.read_excel(
-        file_path,
-        sheet_name=SHEET_NAME,
-        header=1,
-        usecols=range(IDENTITY_COL_COUNT),
-    )
+REQUIRED_RAW_COLUMNS = [
+    "No",
+    "Nama",
+    "No HP",
+    "Jenis Kelamin",
+    "Alamat",
+    "Umur (tahun)",
+    "Jumlah Anggota Keluarga",
+    "Pekerjaan Utama Pencari Nafkah",
+    "Pendidikan Terakhir",
+    "Penghasilan Keluarga per Bulan (Rupiah)",
+    "Pengeluaran Keluarga per Bulan (Rupiah)",
+    "Luas Lahan Sawit (Hektar)",
+    "Status Lahan",
+    "Jumlah Pohon Sawit (pohon)",
+    "Produksi Rata-rata (ton/bulan)",
+    "Lama menjadi Petani Sawit (tahun)",
+    "Pelatihan yang pernah diikuti terkait Sawit",
+]
+
+
+def standardize_raw_columns(raw: pd.DataFrame) -> pd.DataFrame:
+    raw = raw.copy()
     raw.columns = [clean_column_name(col) for col in raw.columns]
-    raw = raw.dropna(how="all").copy()
+    return raw.dropna(how="all").copy()
+
+
+def missing_raw_columns(raw: pd.DataFrame) -> list[str]:
+    return [column for column in REQUIRED_RAW_COLUMNS if column not in raw.columns]
+
+
+def read_excel_data(source: str | BytesIO) -> pd.DataFrame:
+    candidates: list[pd.DataFrame] = []
+    errors: list[Exception] = []
+
+    for sheet_name in (SHEET_NAME, 0):
+        for header in (1, 0):
+            if hasattr(source, "seek"):
+                source.seek(0)
+            try:
+                raw = pd.read_excel(
+                    source,
+                    sheet_name=sheet_name,
+                    header=header,
+                    usecols=range(IDENTITY_COL_COUNT),
+                )
+            except Exception as error:
+                errors.append(error)
+                continue
+
+            raw = standardize_raw_columns(raw)
+            candidates.append(raw)
+            if not missing_raw_columns(raw):
+                return raw
+
+    if candidates:
+        return candidates[0]
+    if errors:
+        raise errors[0]
+    raise ValueError(t("no_readable_excel"))
+
+
+def read_raw_data(source: str | BytesIO, extension: str) -> pd.DataFrame:
+    extension = extension.lower()
+    if extension in {".xlsx", ".xls"}:
+        return read_excel_data(source)
+    if extension == ".csv":
+        return standardize_raw_columns(pd.read_csv(source))
+    if extension == ".parquet":
+        return standardize_raw_columns(pd.read_parquet(source))
+    raise ValueError(t("unsupported_file_type").format(extension=extension or "-"))
+
+
+def process_raw_data(raw: pd.DataFrame) -> pd.DataFrame:
+    raw = standardize_raw_columns(raw)
+    missing_columns = missing_raw_columns(raw)
+    if missing_columns:
+        raise ValueError(t("missing_required_columns").format(columns=", ".join(missing_columns)))
 
     df = pd.DataFrame()
     df["No"] = raw["No"]
@@ -571,19 +773,28 @@ def load_data(file_path: str, file_signature: int) -> pd.DataFrame:
     df["Pendidikan Terakhir"] = raw["Pendidikan Terakhir"].map(normalize_education)
     df["Penghasilan Keluarga per Bulan (Rupiah)"] = raw[
         "Penghasilan Keluarga per Bulan (Rupiah)"
-    ].map(extract_number)
+    ].map(parse_money_rupiah)
     df["Pengeluaran Keluarga per Bulan (Rupiah)"] = raw[
         "Pengeluaran Keluarga per Bulan (Rupiah)"
-    ].map(extract_number)
-    df["Luas Lahan Sawit (Hektar)"] = raw["Luas Lahan Sawit (Hektar)"].map(extract_number)
+    ].map(parse_money_rupiah)
+    extra_zero_expense = (
+        (df["Pengeluaran Keluarga per Bulan (Rupiah)"] > EXPENSE_EXTRA_ZERO_THRESHOLD)
+        & df["Penghasilan Keluarga per Bulan (Rupiah)"].notna()
+        & (
+            df["Pengeluaran Keluarga per Bulan (Rupiah)"]
+            > df["Penghasilan Keluarga per Bulan (Rupiah)"] * EXPENSE_INCOME_RATIO_FOR_EXTRA_ZERO
+        )
+    )
+    df.loc[extra_zero_expense, "Pengeluaran Keluarga per Bulan (Rupiah)"] /= 10
+    df["Luas Lahan Sawit (Hektar)"] = raw["Luas Lahan Sawit (Hektar)"].map(parse_land_hectare)
     df["Status Lahan"] = raw["Status Lahan"].map(normalize_land_status)
-    df["Jumlah Pohon Sawit (pohon)"] = raw["Jumlah Pohon Sawit (pohon)"].map(extract_number)
+    df["Jumlah Pohon Sawit (pohon)"] = raw["Jumlah Pohon Sawit (pohon)"].map(parse_tree_count)
     df["Produksi Rata-rata (ton/bulan)"] = raw["Produksi Rata-rata (ton/bulan)"].map(
         parse_production_ton
     )
     df["Lama menjadi Petani Sawit (tahun)"] = raw[
         "Lama menjadi Petani Sawit (tahun)"
-    ].map(extract_number)
+    ].map(parse_farming_years)
     df["Jenis Pelatihan Sawit"] = raw[
         "Pelatihan yang pernah diikuti terkait Sawit"
     ].map(normalize_training_type)
@@ -591,9 +802,6 @@ def load_data(file_path: str, file_signature: int) -> pd.DataFrame:
         "Pelatihan yang pernah diikuti terkait Sawit"
     ].map(normalize_training_status)
 
-    df["Produktivitas Sawit (ton/ha/bulan)"] = (
-        df["Produksi Rata-rata (ton/bulan)"] / df["Luas Lahan Sawit (Hektar)"]
-    ).replace([np.inf, -np.inf], np.nan)
     df["Surplus Pendapatan (Rupiah/bulan)"] = (
         df["Penghasilan Keluarga per Bulan (Rupiah)"]
         - df["Pengeluaran Keluarga per Bulan (Rupiah)"]
@@ -605,6 +813,18 @@ def load_data(file_path: str, file_signature: int) -> pd.DataFrame:
         "Pengeluaran Keluarga per Bulan (Rupiah)"
     ] / 1_000_000
     return df
+
+
+@st.cache_data(show_spinner=False)
+def load_existing_data(file_path: str, file_signature: int) -> pd.DataFrame:
+    raw = read_raw_data(file_path, Path(file_path).suffix)
+    return process_raw_data(raw)
+
+
+@st.cache_data(show_spinner=False)
+def load_uploaded_data(file_name: str, file_content: bytes) -> pd.DataFrame:
+    raw = read_raw_data(BytesIO(file_content), Path(file_name).suffix)
+    return process_raw_data(raw)
 
 
 def format_integer(value: float) -> str:
@@ -909,19 +1129,20 @@ def boxplot(
         categories = [item for item in data[x_col].dropna().unique()]
         for i, category in enumerate(categories):
             values = data.loc[data[x_col] == category, y_col].dropna()
+            display_category = category_label(category)
             fig.add_trace(
                 go.Box(
                     y=values,
-                    name=str(category),
+                    name=display_category,
                     marker_color=PALETTE[i % len(PALETTE)],
                     boxmean=True,
                     jitter=0.25,
                     pointpos=-1.6,
                     boxpoints="outliers",
-                    hovertemplate=f"{category}<br>{y_title}: %{{y}}<extra></extra>",
+                    hovertemplate=f"{display_category}<br>{y_title}: %{{y}}<extra></extra>",
                 )
             )
-        return apply_journal_layout(fig, title, x_col, y_title, height, showlegend=False)
+        return apply_journal_layout(fig, title, variable_label(x_col), y_title, height, showlegend=False)
 
     fig.add_trace(
         go.Box(
@@ -981,7 +1202,7 @@ def mean_bar(
             text=[format_decimal(value, 2) for value in values],
             textposition="outside",
             cliponaxis=False,
-            hovertemplate="%{x}<br>Rata-rata: %{y:.2f}<extra></extra>",
+            hovertemplate=f"%{{x}}<br>{t('mean')}: %{{y:.2f}}<extra></extra>",
         )
     )
     return apply_journal_layout(fig, title, "", y_title, height)
@@ -1133,28 +1354,57 @@ def render_numeric_profile(
         )
 
 
-if not DATA_FILE.exists():
-    st.error(f"File data tidak ditemukan: {DATA_FILE}")
-    st.stop()
-
-
-data_signature = DATA_FILE.stat().st_mtime_ns
-data = load_data(str(DATA_FILE), data_signature)
-
 with st.sidebar:
     language_choice = st.radio(
-        "Bahasa / Language",
-        ["Indonesia", "English"],
+        t("language"),
+        list(LANGUAGE_OPTIONS),
         horizontal=True,
-        index=0,
+        index=list(LANGUAGE_OPTIONS).index(st.session_state.get("language_choice", "Indonesia")),
+        key="language_choice",
     )
-    APP_LANG = "en" if language_choice == "English" else "id"
-
-    if st.button(t("reload_data"), use_container_width=True):
-        load_data.clear()
-        st.rerun()
+    APP_LANG = language_code(language_choice)
 
     st.header(t("sidebar_title"))
+
+    st.subheader(t("data_source"))
+    data_source_choice = st.radio(
+        t("data_source"),
+        [DATA_SOURCE_EXISTING, DATA_SOURCE_UPLOAD],
+        format_func=lambda option: (
+            t("use_available_data") if option == DATA_SOURCE_EXISTING else t("upload_data")
+        ),
+        index=0,
+        label_visibility="collapsed",
+        key="data_source_choice",
+    )
+    uploaded_file = None
+    if data_source_choice == DATA_SOURCE_UPLOAD:
+        uploaded_file = st.file_uploader(
+            t("upload_file"),
+            type=UPLOAD_FILE_TYPES,
+            help=t("upload_help"),
+        )
+
+    if st.button(t("reload_data"), use_container_width=True):
+        load_existing_data.clear()
+        load_uploaded_data.clear()
+        st.rerun()
+
+    try:
+        if data_source_choice == DATA_SOURCE_UPLOAD:
+            if uploaded_file is None:
+                st.info(t("upload_missing"))
+                st.stop()
+            data = load_uploaded_data(uploaded_file.name, uploaded_file.getvalue())
+        else:
+            if not DATA_FILE.exists():
+                st.error(t("file_not_found").format(file_name=DATA_FILE))
+                st.stop()
+            data_signature = DATA_FILE.stat().st_mtime_ns
+            data = load_existing_data(str(DATA_FILE), data_signature)
+    except Exception as error:
+        st.error(t("data_load_error").format(error=error))
+        st.stop()
 
     gender_options = sorted(data["Jenis Kelamin"].dropna().unique(), key=category_label)
     education_options = sorted(data["Pendidikan Terakhir"].dropna().unique(), key=category_label)
@@ -1188,6 +1438,9 @@ with st.sidebar:
         )
 
         ages = data["Umur (tahun)"].dropna()
+        if ages.empty:
+            st.warning(t("invalid_age_filter"))
+            st.stop()
         age_min = int(ages.min())
         age_max = int(ages.max())
         age_filter = st.slider(t("age_range"), age_min, age_max, (age_min, age_max))
@@ -1271,14 +1524,6 @@ numeric_profiles = [
         "unit_en": "years",
         "bins": 18,
     },
-    {
-        "column": "Produktivitas Sawit (ton/ha/bulan)",
-        "color": PALETTE[9],
-        "digits": 2,
-        "unit_id": "ton/ha/bln",
-        "unit_en": "tons/ha/month",
-        "bins": 20,
-    },
 ]
 
 numeric_columns = [profile["column"] for profile in numeric_profiles]
@@ -1300,7 +1545,6 @@ public_columns = [
     "Lama menjadi Petani Sawit (tahun)",
     "Jenis Pelatihan Sawit",
     "Status Pelatihan Sawit",
-    "Produktivitas Sawit (ton/ha/bulan)",
     "Surplus Pendapatan (Rupiah/bulan)",
 ]
 
@@ -1543,6 +1787,6 @@ with tab_data:
     st.download_button(
         t("download_csv"),
         data=csv_data,
-        file_name="profil_deskriptif_sawit_terolah.csv",
+        file_name=t("download_file_name"),
         mime="text/csv",
     )
