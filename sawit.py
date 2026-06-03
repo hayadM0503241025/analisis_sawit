@@ -278,10 +278,6 @@ VARIABLE_LABELS = {
         "id": "Status Pelatihan Sawit",
         "en": "Oil Palm Training Status",
     },
-    "Surplus Pendapatan (Rupiah/bulan)": {
-        "id": "Surplus Pendapatan (Rupiah/bulan)",
-        "en": "Income Surplus (Rupiah/month)",
-    },
     "Penghasilan (juta Rupiah/bulan)": {
         "id": "Penghasilan (juta Rupiah/bulan)",
         "en": "Income (million Rupiah/month)",
@@ -802,10 +798,6 @@ def process_raw_data(raw: pd.DataFrame) -> pd.DataFrame:
         "Pelatihan yang pernah diikuti terkait Sawit"
     ].map(normalize_training_status)
 
-    df["Surplus Pendapatan (Rupiah/bulan)"] = (
-        df["Penghasilan Keluarga per Bulan (Rupiah)"]
-        - df["Pengeluaran Keluarga per Bulan (Rupiah)"]
-    )
     df["Penghasilan (juta Rupiah/bulan)"] = df[
         "Penghasilan Keluarga per Bulan (Rupiah)"
     ] / 1_000_000
@@ -1545,7 +1537,6 @@ public_columns = [
     "Lama menjadi Petani Sawit (tahun)",
     "Jenis Pelatihan Sawit",
     "Status Pelatihan Sawit",
-    "Surplus Pendapatan (Rupiah/bulan)",
 ]
 
 categorical_columns = [
